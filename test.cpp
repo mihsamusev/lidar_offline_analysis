@@ -6,7 +6,8 @@
 #include <stdlib.h>
 
 // original includes
-#include <cloudhelper.h>
+#include <cloudframes.h>
+#include <cloudviewer.h>
 
 // 3rd party includes
 #include <pcl/common/common_headers.h>
@@ -21,8 +22,12 @@
 typedef pcl::PointCloud<pcl::PointXYZ>::ConstPtr XYZcloudCPtr;
 typedef pcl::PointCloud<pcl::PointXYZ>::Ptr XYZcloudPtr;
 typedef pcl::PointCloud<pcl::PointXYZ> XYZcloud;
+
 typedef pcl::visualization::PCLVisualizer::Ptr VizPtr;
 typedef pcl::visualization::PCLVisualizer Viz;
+
+typedef std::unique_ptr<CloudViewer> CloudViewerPtr;
+typedef std::shared_ptr<CloudFrames> CloudFramesPtr;
 
 // global scope
 const std::string PATH = "C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data";
@@ -39,89 +44,6 @@ printUsage(const char* progName)
 		<< "-v           Viewports example\n"
 		<< "-i           Interaction Customization example\n"
 		<< "\n\n";
-}
-
-void 
-keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event, void* viewer_void)
-{
-	Viz* viewer = static_cast<Viz*> (viewer_void);
-	if (event.getKeySym() == "Right" && event.keyDown() && pc_id < 20499)
-	{
-		char pc_filename[512];
-		sprintf(pc_filename, "\\frames\\frame%d.pcd", ++pc_id);
-		std::cout << "RIGHT was pressed => updating the point cloud to " << PATH + pc_filename << std::endl;
-
-		XYZcloudPtr new_pc(new XYZcloud);
-		pcl::io::loadPCDFile(PATH + pc_filename, *new_pc);
-		viewer->updatePointCloud(new_pc, "cloud1");
-	}
-	else if (event.getKeySym() == "Left" && event.keyDown() && pc_id > 19000)
-	{
-		char pc_filename[512];
-		sprintf(pc_filename, "\\frames\\frame%d.pcd", --pc_id);
-		std::cout << "LEFT was pressed => updating the point cloud to " << PATH + pc_filename << std::endl;
-
-		XYZcloudPtr new_pc(new XYZcloud);
-		pcl::io::loadPCDFile(PATH + pc_filename, *new_pc);
-		viewer->updatePointCloud(new_pc, "cloud1");
-	}
-
-	if (event.getKeySym() == "m" && event.keyDown())
-	{
-		viewer->saveCameraParameters(PATH + "\\camparam.cam");
-		std::cout << "Saved camera parameters" << std::endl;
-	}
-}
-
-VizPtr 
-scroll(XYZcloudCPtr initCloud)
-{
-	// instance of viewer
-	VizPtr viewer(new Viz("3D Viewer"));
-
-	// initial settings
-	viewer->setBackgroundColor(0, 0, 0);
-	viewer->addPointCloud<pcl::PointXYZ>(initCloud, "cloud1");
-	viewer->addCoordinateSystem(1.0); // scale = 1.0
-	viewer->initCameraParameters();
-	viewer->loadCameraParameters(PATH + "\\camparam.cam");
-
-	// listener, viewer.get() returns raw pointer from boost::shared_ptr and (void*) casts it to void 
-	// pointer to provide type independent input
-	void* userData = (void*)viewer.get();
-	viewer->registerKeyboardCallback(keyboardEventOccurred, userData);
-	return (viewer);
-}
-
-VizPtr
-scrolldouble(XYZcloudCPtr initCloud, XYZcloudCPtr background)
-{
-	// instance of viewer
-	VizPtr viewer(new Viz("3D Viewer"));
-
-	// specify settings common for both viewports
-	viewer->initCameraParameters();
-	viewer->loadCameraParameters(PATH + "\\camparam.cam");
-
-	// initial settings for viewport 0
-	int v1(0);
-	viewer->createViewPort(0.0, 0.0, 0.5, 1.0, v1);
-	viewer->setBackgroundColor(0.1, 0.1, 0.1, v1);
-	viewer->addPointCloud<pcl::PointXYZ>(initCloud, "cloud1", v1);
-	viewer->addCoordinateSystem(1.0); // scale = 1.0
-
-	// listener, viewer.get() returns raw pointer from boost::shared_ptr and (void*) casts it to void 
-	// pointer to provide type independent input (C style flex)
-	void* userData = (void*)viewer.get();
-	viewer->registerKeyboardCallback(keyboardEventOccurred, userData);
-
-	// initial settings for viewport 1
-	int v2(1);
-	viewer->createViewPort(0.5, 0.0, 1.0, 1.0, v2);
-	viewer->setBackgroundColor(0, 0, 0, v2);
-	viewer->addPointCloud<pcl::PointXYZ>(background, "background", v2);
-
-	return (viewer);
 }
 
 // main function
@@ -147,38 +69,32 @@ main(int argc, char** argv)
 		return 0;
 	}
 
-	// Initialize start point
-	std::cout << "Loading point clouds.\n\n";
-	CloudHelper ch;
-	ch.read_all_clouds(PATH + "\\frames");
-	for (size_t i = 0; i < ch.clouds.size(); i++)
+	std::cout << "Loading point clouds...\n";
+	CloudFramesPtr ch = std::make_shared<CloudFrames>();
+	const std::string PATH2 = 
+		"C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data\\testframes";
+	const std::string BG_PATH =
+		"C:/Users/msa/Documents/cpp/pcl_analysis/data/background.pcd";
+	// loud clouds to memory
+	ch->read_all_clouds(PATH2);
+	ch->segmentBG_all(BG_PATH);
+
+	float a = - 3.1415 / 3.0;
+	//ch->rotateAll(0.0, 1.0, 0.0, a);
+
+	std::cout << "Initializing cloud viewer\n";
+	CloudViewerPtr viewer = std::make_unique<CloudViewer>();
+	if (viewer->setFrames(ch))
 	{
-		std::cout << "Cloud " << i <<
-			" has " << ch.clouds[i]->points.size() <<
-			" points" << std::endl;		
+		viewer->initView();
 	}
 
-	XYZcloudPtr pc(new XYZcloud);
-	XYZcloudPtr bg(new XYZcloud);
-	pcl::io::loadPCDFile(PATH + "\\frames\\frame19000.pcd", *pc);
-	pcl::io::loadPCDFile(PATH + "\\background.pcd", *bg);
-
-	// Octree resolution - side length of octree voxels
-	pcl::search::KdTree<pcl::PointXYZ>::Ptr kdtree(new pcl::search::KdTree<pcl::PointXYZ>);
-	XYZcloudPtr diffCloud(new XYZcloud);
-	pcl::SegmentDifferences<pcl::PointXYZ> sdiff;
-	sdiff.setInputCloud(pc);
-	sdiff.setTargetCloud(bg);
-	sdiff.setSearchMethod(kdtree);
-	sdiff.setDistanceThreshold(tol);
-	sdiff.segment(*diffCloud);
-
-	VizPtr viewer;
-	//viewer = scroll(pc);
-	viewer = scrolldouble(pc, diffCloud);
-
+	std::cout << "Running visualization\n";
 	while(!viewer->wasStopped())
 	{
+		// rotate current maybe?
+
+		// substract bg
 		viewer->spinOnce();
 	}
 }
