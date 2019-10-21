@@ -3,6 +3,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <cmath>
 
 // original includes
 #include "cloudframes.h"
@@ -13,13 +14,19 @@
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
 #include <boost/filesystem.hpp>
+#include <pcl/common/transforms.h>
 
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
 
-#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/kdtree/kdtree.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/segmentation/conditional_euclidean_clustering.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/segmentation/segment_differences.h>
+
+#include <pcl/segmentation//extract_polygonal_prism_data.h>
+#include <pcl/filters/extract_indices.h>
 
 // aliases
 namespace fs = boost::filesystem;
@@ -28,7 +35,25 @@ typedef pcl::PointCloud<pcl::PointXYZ> XYZcloud;
 
 // PUBLIC METHODS
 
-bool CloudFrames::read_all_clouds(const std::string& path)
+bool CloudFrames::readBackground(const std::string& path)
+{
+	// error checking here maybe
+	XYZcloudPtr bg(new XYZcloud);
+	pcl::io::loadPCDFile(path, *bg);
+	this->background = bg;
+	return true;
+}
+
+bool CloudFrames::readROI(const std::string& path)
+{
+	// error checking here maybe
+	XYZcloudPtr roi(new XYZcloud);
+	pcl::io::loadPCDFile(path, *roi);
+	this->roi = roi;
+	return true;
+}
+
+bool CloudFrames::readClouds(const std::string& path)
 {
 	// check if path exists and is directory
 	if(!fs::is_directory(path))
@@ -52,20 +77,180 @@ bool CloudFrames::read_all_clouds(const std::string& path)
 	
 	for (fs::directory_entry& cloudFile : fs::directory_iterator(path))
 	{
-		XYZcloudPtr pc(new XYZcloud);
-		if (pcl::io::loadPCDFile(cloudFile.path().string(), *pc) == -1)
+		XYZcloudPtr cloud(new XYZcloud);
+		if (pcl::io::loadPCDFile(cloudFile.path().string(), *cloud) == -1)
 		{
 			PCL_ERROR("Couldn't read file");
 			return false;
 		}
-		this->clouds.push_back(pc);
+		if (this->floorAlignedCC)
+		{
+			transformToFloorAlignedCC(cloud);
+		}
+		this->clouds.push_back(cloud);
 	}
 
 	return true;
 }
 
 
+
+bool CloudFrames::estimateFloor()
+{
+	XYZcloudPtr fl(new XYZcloud);
+
+	double tol = 0.2;
+
+	// get floor from background if possible, else try
+	// from the very first cloud
+	if (this->background->points.size() != 0)
+	{
+		fitPlane(this->background, fl, this->plane_coeff, tol);
+		this->floor = fl;
+		return true;
+	}
+	else if(this->clouds.size() != 0)
+	{
+		fitPlane(this->clouds[0], fl, this->plane_coeff, tol);
+		this->floor = fl;
+		return true;
+	}
+	else
+	{
+		std::cout << "[ERROR] missing background cloud or at least one frame cloud to perform plane fitting\n";
+		return false;
+	}
+}
+
+bool CloudFrames::transformToMatchFloor()
+{
+	this->floorAlignedCC = true;
+
+	if (!transformToFloorAlignedCC(this->floor))
+	{
+		std::cout << "[ERROR] floor has not been estimated yet and needs to be initialized first\n";
+		return false;
+	}
+
+	if (!transformToFloorAlignedCC(this->background))
+	{
+		std::cout << "[ERROR] floor has not been estimated yet and needs to be initialized first\n";
+		return false;
+	}
+
+	for (size_t i = 0; i < this->clouds.size(); i++)
+	{
+		transformToFloorAlignedCC(this->clouds[i]);
+	}
+
+	return true;
+}
+
+bool CloudFrames::cropByROI()
+{
+	if (this->roi->points.size() != 0)
+	{
+		// incude error checking at some point
+		cropByXYPoly(this->floor, this->roi);
+		cropByXYPoly(this->background, this->roi);
+
+		for (size_t i = 0; i < this->clouds.size(); i++)
+		{
+			cropByXYPoly(this->clouds[i], this->roi);
+		}
+
+		return true;
+	}
+}
+
+bool CloudFrames::subtractBackground()
+{
+	if (this->background->points.size() != 0)
+	{
+		for (size_t i = 0; i < this->clouds.size(); i++)
+		{
+			XYZcloudPtr nobg(new XYZcloud);
+			subtractBG(this->background, this->clouds[i], nobg, 0.1, 1);
+			this->clouds[i] = nobg;
+		}
+		return true;
+	}
+	else
+	{
+		std::cout << "[ERROR] missing background cloud to perform substraction\n";
+		return false;
+	}
+}
+
+
+
+std::vector<pcl::PointIndices> 
+CloudFrames::clusterCloud(XYZcloudPtr cloud, float tol)
+{
+	int minPts = cloud->points.size() / 1000; // 0.1% pts
+	int maxPts = cloud->points.size(); // all pts
+
+	std::vector<pcl::PointIndices> cluster_indices;
+	pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+	ec.setClusterTolerance(tol);
+	ec.setMinClusterSize(minPts);
+	ec.setMaxClusterSize(maxPts);
+
+	pcl::search::KdTree<pcl::PointXYZ>::Ptr 
+		tree(new pcl::search::KdTree<pcl::PointXYZ>);
+	tree->setInputCloud(cloud);
+	ec.setSearchMethod(tree);
+	ec.setInputCloud(cloud);
+	ec.extract(cluster_indices);
+
+	return cluster_indices;
+}
+
 // PRIVATE METHODS
+
+void CloudFrames::cropByXYPoly(XYZcloudPtr cloud_in, XYZcloudPtr poly)
+{
+	// allocate vector of inliers
+	pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
+	int cloudPts = cloud_in->points.size();
+	inliers->indices.reserve(cloudPts / 4);
+
+	// check every point is within a polygon
+	for (size_t i = 0; i < cloudPts; i++)
+	{
+		if (pcl::isPointIn2DPolygon(cloud_in->points[i], *poly))
+		{
+			inliers->indices.push_back(i);
+		}
+	}
+
+	pcl::ExtractIndices<pcl::PointXYZ> extract;
+	extract.setInputCloud(cloud_in);
+	extract.setIndices(inliers);
+	extract.filter(*cloud_in);
+}
+
+void CloudFrames::fitPlane(XYZcloudPtr cloud_in, XYZcloudPtr cloud_out, 
+	Eigen::VectorXf &plane_coeff, double tol=0.1)
+{
+	// indices of points giving closest match to ransac plane model
+	std::vector<int>inliers;
+
+	// created RandomSampleConsensus object and compute the model
+	pcl::SampleConsensusModelPlane<pcl::PointXYZ>::Ptr 
+		modelp(new pcl::SampleConsensusModelPlane<pcl::PointXYZ>(cloud_in));
+	pcl::RandomSampleConsensus<pcl::PointXYZ>ransac(modelp);
+	ransac.setDistanceThreshold(tol);
+	ransac.computeModel();
+	ransac.getInliers(inliers);
+
+	// obtain plane coefficients (A,B,C,D) for Ax + By + Cz + D = 0
+	// where (A,B,C) is the unit normal vector
+	ransac.getModelCoefficients(plane_coeff);
+
+	// copies all inliers of the model computed to another PointCloud
+	pcl::copyPointCloud<pcl::PointXYZ>(*cloud_in, inliers, *cloud_out);
+}
 
 Eigen::Quaterniond CloudFrames::getQuaterniond(float nx, float ny, float nz, float a)
 {
@@ -75,6 +260,22 @@ Eigen::Quaterniond CloudFrames::getQuaterniond(float nx, float ny, float nz, flo
 	float z = sin(a / 2) * nz;
 	Eigen::Quaterniond quat(w, x, y, z);
 	return quat;
+}
+
+Eigen::Quaterniond CloudFrames::getQuaterniond(Eigen::Vector3f normal, Eigen::Vector3f axis)
+{
+	// make sure vectors have unit length
+	normal.normalize();
+	axis.normalize();
+	
+	// find angle between vectors
+	float theta = acos(normal.dot(axis));
+	
+	// find rotation axis and ensure its unit length
+	Eigen::Vector3f rotAxis = normal.cross(axis);
+	rotAxis.normalize();
+	Eigen::Quaterniond q = getQuaterniond(rotAxis(0), rotAxis(1), rotAxis(2), theta);
+	return q;
 }
 
 void CloudFrames::rotateCloud(XYZcloudPtr cloudPtr, Eigen::Quaterniond& quat)
@@ -92,86 +293,39 @@ void CloudFrames::rotateCloud(XYZcloudPtr cloudPtr, Eigen::Quaterniond& quat)
 	}
 }
 
-void CloudFrames::rotateAll(float nx, float ny, float nz, float a)
+bool CloudFrames::transformToFloorAlignedCC(XYZcloudPtr cloudPtr)
 {
-	Eigen::Quaterniond q = getQuaterniond(nx, ny, nz, a);
-	
-	for (size_t i = 0; i < this->clouds.size(); i++)
+	if (cloudPtr->points.size() != 0)
 	{
-		rotateCloud(this->clouds[i], q); // shoud i do double pointer here?
+		// Define transform based on the plane coefficients
+		// calculate at initFloor => fitPlane
+		Eigen::Affine3f transform = Eigen::Affine3f::Identity();
+		double D = this->plane_coeff(3);
+		double dx = D * this->plane_coeff(0);
+		double dy = D * this->plane_coeff(1);
+		double dz = D * this->plane_coeff(2);
+
+		// Define a translation of D units along normal N = (dx, dy, dz)
+		transform.translation() << dx, dy, dz;
+
+		// Executing the transformation for floor
+		pcl::transformPointCloud(*cloudPtr, *cloudPtr, transform);
+		
+		// calculate quaternion and rotate the point cloud
+		Eigen::Vector3f normal(this->plane_coeff(0), this->plane_coeff(1), this->plane_coeff(2));
+		Eigen::Vector3f zaxis = Eigen::Vector3f::UnitZ();
+		Eigen::Quaterniond q = getQuaterniond(normal, zaxis);
+		rotateCloud(cloudPtr, q);
+
+		return true;
 	}
-}
-
-void CloudFrames::fitPlane(XYZcloudPtr cloud_in, XYZcloudPtr cloud_out, double tol=0.1)
-{
-	std::vector<int>inliers;
-	// created RandomSampleConsensus object and compute the model
-	pcl::SampleConsensusModelPlane<pcl::PointXYZ>::Ptr modelp(new pcl::SampleConsensusModelPlane<pcl::PointXYZ>(cloud_in));
-	pcl::RandomSampleConsensus<pcl::PointXYZ>ransac(modelp);
-	ransac.setDistanceThreshold(tol);
-	ransac.computeModel();
-	ransac.getInliers(inliers);
-
-	// copies all inliers of the model computed to another PointCloud
-	pcl::copyPointCloud<pcl::PointXYZ>(*cloud_in, inliers, *cloud_out);
+	else
+	{
+		return false; 
+	}
 }
 
 void CloudFrames::subtractBG(XYZcloudPtr bg_cloud,
-							 XYZcloudPtr cloud_in,
-							 XYZcloudPtr cloud_out,
-							 double distTol=0.3, double stdCoeff=1)
-{
-	pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-	kdtree.setInputCloud(bg_cloud);
-	kdtree.setEpsilon(0);
-
-	// for each of the points in the current frame
-	for (int i = 0; i < cloud_in->points.size(); i++)
-	{
-		float x1 = cloud_in->points[i].x;
-		float y1 = cloud_in->points[i].y;
-		float z1 = cloud_in->points[i].z;
-
-		double min_dist = 10000000;
-
-		for (int z = 0; z < bg_cloud->size(); z++)
-		{
-			float x2 = bg_cloud->points[z].x;
-			float y2 = bg_cloud->points[z].y;
-			float z2 = bg_cloud->points[z].z;
-
-			// euclidean dinstance between points
-			double n_my_dist = sqrt((x2 - x1) * (x2 - x1) + 
-									(y2 - y1) * (y2 - y1) + 
-									(z2 - z1) * (z2 - z1));
-
-			if (n_my_dist < min_dist)
-			{
-				min_dist = n_my_dist;
-			}
-		}
-
-		if (min_dist > distTol)
-		{
-			pcl::PointXYZ basic_point;
-			basic_point.x = cloud_in->points[i].x;
-			basic_point.y = cloud_in->points[i].y;
-			basic_point.z = cloud_in->points[i].z;
-			cloud_out->points.push_back(basic_point);
-		}
-	}
-	
-
-	// remove outliers
-	pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-	sor.setInputCloud(cloud_out);
-	sor.setMeanK(5);
-	sor.setStddevMulThresh(stdCoeff);
-	sor.filter(*cloud_out);
-	
-}
-
-void CloudFrames::segmentBG(XYZcloudPtr bg_cloud,
 							XYZcloudPtr cloud_in,
 							XYZcloudPtr cloud_out,
 							double distTol=0.1, double stdCoeff=1)
@@ -194,17 +348,6 @@ void CloudFrames::segmentBG(XYZcloudPtr bg_cloud,
 	sor.filter(*cloud_out);//*/
 }
 
-void CloudFrames::segmentBG_all(const std::string& bg_path)
-{
-	XYZcloudPtr bg(new XYZcloud);
-	pcl::io::loadPCDFile(bg_path, *bg);
 
-	for (size_t i = 0; i < this->clouds.size(); i++)
-	{
-		XYZcloudPtr nobg(new XYZcloud);
-		segmentBG(bg, this->clouds[i], nobg, 0.1, 1);
-		this->clouds[i] = nobg;
-	}
-}
 
 

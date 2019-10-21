@@ -34,67 +34,60 @@ const std::string PATH = "C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data";
 unsigned int pc_id = 19000;
 
 // functions
-void 
-printUsage(const char* progName)
+void debugInfo(const std::string type, const std::string message)
 {
-	std::cout << "\n\nUsage: " << progName << " [options]\n\n"
-		<< "Options:\n"
-		<< "-------------------------------------------\n"
-		<< "-h           this help\n"
-		<< "-v           Viewports example\n"
-		<< "-i           Interaction Customization example\n"
-		<< "\n\n";
+	std::cout << type << " " << message << std::endl;
 }
 
 // main function
 int 
 main(int argc, char** argv)
 {
-	// Parse command arguments
-	if (pcl::console::find_argument(argc, argv, "-h") >= 0)
-	{
-		printUsage(argv[0]);
-		return 0;
-	}
-
-	double tol;
-	int inputPos = pcl::console::find_argument(argc, argv, "-t");
-	if (inputPos >= 0)
-	{
-		tol = atof(argv[inputPos + 1]);
-	}
-	else
-	{
-		printUsage(argv[0]);
-		return 0;
-	}
-
-	std::cout << "Loading point clouds...\n";
-	CloudFramesPtr ch = std::make_shared<CloudFrames>();
-	const std::string PATH2 = 
-		"C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data\\testframes";
+	// some thats that are later going to be diefined in .ini file
+	const std::string CLOUDS_PATH = 
+		"C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data\\frames";
 	const std::string BG_PATH =
 		"C:/Users/msa/Documents/cpp/pcl_analysis/data/background.pcd";
-	// loud clouds to memory
-	ch->read_all_clouds(PATH2);
-	ch->segmentBG_all(BG_PATH);
+	const std::string BB_PATH =
+		"C:/Users/msa/Documents/cpp/pcl_analysis/data/bb_after_transform.pcd";
+	const std::string CAM_PATH =
+		"C:/Users/msa/Documents/cpp/pcl_analysis/data/camparam.cam";
+	// Initialize CloudFrames class
 
-	float a = - 3.1415 / 3.0;
-	//ch->rotateAll(0.0, 1.0, 0.0, a);
+	debugInfo("[INFO]","Initializing CloudFrames");
+	CloudFramesPtr ch = std::make_shared<CloudFrames>();
 
-	std::cout << "Initializing cloud viewer\n";
+	debugInfo("[INFO]", "Reading background from " + BG_PATH);
+	ch->readBackground(BG_PATH);	// in lidar CC
+
+	debugInfo("[INFO]", "Reading all clouds from " + CLOUDS_PATH);
+	ch->readClouds(CLOUDS_PATH); // in lidar CC
+	
+	debugInfo("[INFO]", "Reading region of interest from " + BB_PATH);
+	ch->readROI(BB_PATH); // in road plane CC, remember that!
+
+	// Detect floor with plane fitting RANSAC
+	// The coordinate system is now based on the floor
+	// match road plane normal and z axes
+	debugInfo("[INFO]", "Estimating road plane and transforming data to road alligned CC");
+	ch->estimateFloor();
+	ch->transformToMatchFloor();
+
+	// crop everything by ROI and remove background
+	debugInfo("[INFO]", "Filtering by ROI and subtracting background");
+	ch->cropByROI();
+	ch->subtractBackground();
+
+	debugInfo("[INFO]", "Initializing CloudViewer");
 	CloudViewerPtr viewer = std::make_unique<CloudViewer>();
 	if (viewer->setFrames(ch))
 	{
-		viewer->initView();
+		viewer->initView(CAM_PATH);
 	}
 
-	std::cout << "Running visualization\n";
+	debugInfo("[INFO]", "Running visualization");
 	while(!viewer->wasStopped())
 	{
-		// rotate current maybe?
-
-		// substract bg
-		viewer->spinOnce();
+		viewer->spin();
 	}
 }

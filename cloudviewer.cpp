@@ -1,6 +1,7 @@
 // native c++ includes
 #include <string>
 #include <iostream>
+#include <vector>
 
 // project includes
 #include <cloudframes.h>
@@ -10,6 +11,8 @@
 #include <pcl/common/common_headers.h>
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/io/pcd_io.h> // temporary, just for BG
+#include <pcl/features/normal_3d.h>
+#include <pcl/common/transforms.h>
 
 // aliases
 typedef pcl::PointCloud<pcl::PointXYZ>::ConstPtr XYZcloudCPtr;
@@ -37,20 +40,28 @@ void CloudViewer::spinOnce()
 	this->viewer->spinOnce();
 }
 
+void CloudViewer::spin()
+{
+	this->viewer->spin();
+}
+
 // initialize viewer
 void CloudViewer::initView()
 {
 	this->viewer->setBackgroundColor(0, 0, 0);
 	this->viewer->addCoordinateSystem(1.0); // scale = 1.0
 	this->viewer->initCameraParameters();
-	this->viewer->addPointCloud<pcl::PointXYZ>(this->currentCloudPtr, this->CURRENT_CLOUD_LABEL);
+
+	//this->viewer->addPointCloud<pcl::PointXYZ>(this->currentCloudPtr, this->CURRENT_CLOUD_LABEL);
+	//this->viewer->setPointCloudRenderingProperties(
+		//pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, this->CURRENT_CLOUD_LABEL);
+	this->viewer->setRepresentationToWireframeForAllActors();
 
 	void* cookie = nullptr; // all extra user data is send as void pointer (PCL)
 	this->viewer->registerKeyboardCallback(&CloudViewer::keyboardEventOccurred, *this, cookie);
-	this->viewer->registerPointPickingCallback(&CloudViewer::pointPickingEventOccurred, *this, cookie);
 }
 
-void CloudViewer::initView(std::string& camfile)
+void CloudViewer::initView(const std::string& camfile)
 {
 	this->initView();
 	this->viewer->loadCameraParameters(camfile);
@@ -83,13 +94,13 @@ void CloudViewer::loadNextFrame()
 	{
 		// update id and pointer
 		this->currentFrameId++;
-		this->currentCloudPtr = this->frames->clouds[this->currentFrameId];
-		this->viewer->updatePointCloud(this->currentCloudPtr,
-									   this->CURRENT_CLOUD_LABEL);
-		std::cout << "cap: " << this->currentCloudPtr->points.capacity() <<
-			" size: " << this->currentCloudPtr->points.size() << std::endl;
-
-
+		this->currentCloudPtr = this->frames->clouds[this->currentFrameId]; 
+			
+		// experimental
+		std::vector<pcl::PointIndices> clusterIdx =
+			frames->clusterCloud(this->currentCloudPtr, 0.5);
+		//this->viewer->removeAllPointClouds();
+		renderClusters(clusterIdx);
 	}
 }
 
@@ -104,73 +115,177 @@ void CloudViewer::loadPrevFrame()
 		// update id and pointer
 		this->currentFrameId--;
 		this->currentCloudPtr = this->frames->clouds[this->currentFrameId];
-		this->viewer->updatePointCloud(this->currentCloudPtr,
-										this->CURRENT_CLOUD_LABEL);
+		//renderFrames();
+
+		// experimental
+		std::vector<pcl::PointIndices> clusterIdx =
+			frames->clusterCloud(currentCloudPtr, 1);
+		//this->viewer->removeAllPointClouds();
+		renderClusters(clusterIdx);
+	}
+}
+
+void CloudViewer::drawBoundingBox(XYZcloudPtr cloud, char* name)
+{
+	// Compute centroid and covariance matrix
+	Eigen::Vector4f pcaCentroid;
+	Eigen::Matrix3f covariance;
+	pcl::compute3DCentroid(*cloud, pcaCentroid);
+	computeCovarianceMatrixNormalized(*cloud, pcaCentroid, covariance);
+
+	// get eigenvectors from the covariance matrix,
+	// ensure they are forming a right handed coordinate system
+	Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> 
+		eigen_solver(covariance, Eigen::ComputeEigenvectors);
+	Eigen::Matrix3f eigenVectorsPCA = eigen_solver.eigenvectors();
+	eigenVectorsPCA.col(2) = eigenVectorsPCA.col(0).cross(eigenVectorsPCA.col(1));
+
+	// Prepare transformation matrix where principal components correspond to the axes.
+	Eigen::Matrix4f projectionTransform(Eigen::Matrix4f::Identity());
+	projectionTransform.block<3, 3>(0, 0) = eigenVectorsPCA.transpose();
+	projectionTransform.block<3, 1>(0, 3) = -1.0f * 
+		(projectionTransform.block<3, 3>(0, 0) * pcaCentroid.head<3>());
+	
+	// transform cloud
+	XYZcloudPtr cloudPointsProjected(new XYZcloud);
+	pcl::transformPointCloud(*cloud, *cloudPointsProjected, projectionTransform);
+	
+	// Get the minimum and maximum points of the transformed cloud.
+	pcl::PointXYZ minPoint, maxPoint;
+	pcl::getMinMax3D(*cloudPointsProjected, minPoint, maxPoint);
+	const Eigen::Vector3f meanDiagonal = 0.5f * 
+		(maxPoint.getVector3fMap() + minPoint.getVector3fMap());
+
+	// Final transform
+	const Eigen::Quaternionf bboxQuaternion(eigenVectorsPCA); 
+	const Eigen::Vector3f bboxTransform = 
+		eigenVectorsPCA * meanDiagonal + pcaCentroid.head<3>();
+
+	// create cube
+	this->viewer->addCube(bboxTransform, bboxQuaternion,
+		maxPoint.x - minPoint.x,
+		maxPoint.y - minPoint.y,
+		maxPoint.z - minPoint.z, name);
+}
+
+void CloudViewer::renderFrames()
+{
+	this->viewer->removePointCloud(this->CURRENT_CLOUD_LABEL);
+	this->viewer->addPointCloud(this->currentCloudPtr, this->CURRENT_CLOUD_LABEL);
+	this->viewer->setPointCloudRenderingProperties(
+		pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, this->CURRENT_CLOUD_LABEL);
+}
+
+void CloudViewer::renderClusters(std::vector<pcl::PointIndices>& clusterIdx)
+{
+	// remove clusters
+	for (size_t i = 0; i < clusterNames.size(); i++)
+	{
+		viewer->removePointCloud(clusterNames[i]);
+	}
+	clusterNames.clear();
+
+	// add clusters
+	int n = 0;
+	for (auto it = clusterIdx.begin(); it != clusterIdx.end(); ++it)
+	{
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZ>);
+		cluster->width = it->indices.size();
+		cluster->height = 1;
+		cluster->is_dense = true;
+		cluster->points.reserve(cluster->width);
+		for (auto pit = it->indices.begin(); pit != it->indices.end(); ++pit)
+		{
+			cluster->points.push_back(this->currentCloudPtr->points[*pit]);
+		}
+
+		char cloudname[10];
+		char boxname[10];
+		sprintf(cloudname, "c_%03d", n);
+		sprintf(boxname, "b_%03d", n);
+		n++;
+		clusterNames.push_back(cloudname);
+
+		this->viewer->addPointCloud<pcl::PointXYZ>(cluster, cloudname);
+		float r = rand() / (RAND_MAX + 1.0f);
+		float g = rand() / (RAND_MAX + 1.0f);
+		float b = rand() / (RAND_MAX + 1.0f);
+		this->viewer->setPointCloudRenderingProperties(
+			pcl::visualization::PCL_VISUALIZER_COLOR, r, g, b, cloudname);
+		this->viewer->setPointCloudRenderingProperties(
+			pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, cloudname);
+
 	}
 }
 
 // keys put next and prev frames to viewer for visualization
 void CloudViewer::keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event, void* ud)
 {
-	if (event.getKeySym() == "Right" && event.keyDown())
+	if (event.getKeySym() == "Right" && event.keyDown()) // proceed frame backwards
 	{
 		this->loadNextFrame();
 	}
-	else if (event.getKeySym() == "Left" && event.keyDown())
+	else if (event.getKeySym() == "Left" && event.keyDown()) // proceed frame forwards
 	{
 		this->loadPrevFrame();
 	}
-	else if (event.getKeySym() == "m" && event.keyDown())
+	else if (event.getKeySym() == "n" && event.keyDown()) // turn the floor on and off
 	{
-		
-		XYZcloudPtr plane(new XYZcloud);
-		this->frames->fitPlane(this->currentCloudPtr, plane, 0.2);
-
-		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> col(plane, 255, 0, 255);
-		this->viewer->addPointCloud<pcl::PointXYZ>(plane, col, "plane");
-		this->viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "plane");
+		if (this->frames->floor->size() != 0)
+		{
+			if (this->show_floor)
+			{
+				this->viewer->removePointCloud("floor");
+				this->show_floor = false;
+			}
+			else
+			{
+				this->viewer->addPointCloud<pcl::PointXYZ>(this->frames->floor, "floor");
+				this->viewer->setPointCloudRenderingProperties(
+					pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "floor");
+				this->viewer->setPointCloudRenderingProperties(
+					pcl::visualization::PCL_VISUALIZER_COLOR, 1, 0, 1, "floor");
+				this->show_floor = true;
+			}
+		}
 	}
-	else if (event.getKeySym() == "n" && event.keyDown())
+	else if (event.getKeySym() == "b" && event.keyDown()) // turn the background on and off
 	{
-		
-		XYZcloudPtr bg(new XYZcloud);
-		XYZcloudPtr nobg(new XYZcloud);
-
-		pcl::io::loadPCDFile("C:/Users/msa/Documents/cpp/pcl_analysis/data/background.pcd", *bg);
-		this->frames->segmentBG(bg, this->currentCloudPtr, nobg, 0.1, 1);
-
-		std::cout << "cap: " << nobg->points.capacity() <<
-			" size: " << nobg->points.size() << std::endl;
-
-		//this->viewer->removePointCloud(this->CURRENT_CLOUD_LABEL);
-		//this->viewer->addPointCloud(nobg, this->CURRENT_CLOUD_LABEL);
-		bool flag = this->viewer->updatePointCloud(nobg, this->CURRENT_CLOUD_LABEL);
-		//pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> col(nobg, 0, 255, 0);
-		//this->viewer->addPointCloud<pcl::PointXYZ>(nobg, col, "nobg");
-		//this->viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "nobg");
+		if (this->frames->background->size() != 0)
+		{
+			if (this->show_bg)
+			{
+				this->viewer->removePointCloud("background");
+				this->show_bg = false;
+			}
+			else
+			{
+				this->viewer->addPointCloud<pcl::PointXYZ>(this->frames->background, "background");
+				this->viewer->setPointCloudRenderingProperties(
+					pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "background");
+				this->viewer->setPointCloudRenderingProperties(
+					pcl::visualization::PCL_VISUALIZER_COLOR, 0, 0.5, 1, "background");
+				this->show_bg = true;
+			}
+		}
 	}
-	else if (event.getKeySym() == "b" && event.keyDown())
+	else if (event.getKeySym() == "m" && event.keyDown()) // turn the roi
 	{
-		this->viewer->updatePointCloud(this->currentCloudPtr, this->CURRENT_CLOUD_LABEL);
+		if (this->frames->roi->size() != 0)
+		{
+			if (this->show_roi)
+			{
+				this->viewer->removeShape("roi");
+				this->show_roi = false;
+			}
+			else
+			{
+				this->viewer->addPolygon<pcl::PointXYZ>(this->frames->roi, "roi");
+				this->viewer->setShapeRenderingProperties(
+					pcl::visualization::PCL_VISUALIZER_COLOR, 1,0,0, "roi");
+				this->show_roi = true;
+			}
+		}
 	}
-}
-
-void CloudViewer::pointPickingEventOccurred(const pcl::visualization::PointPickingEvent& event, void* ud)
-{
-	float x, y, z;
-	if (event.getPointIndex() == -1)
-	{
-		return;
-	}
-	event.getPoint(x, y, z);
-	pcl::PointXYZ center;
-	center.x = x;
-	center.y = y;
-	center.z = z;
-
-	this->viewer->removeShape("sphere");
-	this->viewer->addSphere(center, 0.1, 0.3, 0.5, 0.3, "sphere");
-
-	std::cout << "Point coordinate ( " << x << ", " << y << ", " << z << ")" << std::endl;
 }
 

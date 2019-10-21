@@ -1,6 +1,7 @@
 #pragma once
 // native c++ includes
 #include <string>
+#include <vector>
 
 // project includes
 #include "cloudframes.h"
@@ -34,16 +35,25 @@ public:
 	// wrappers for PCLVisualizer
 	bool wasStopped();
 	void spinOnce();
-
+	void spin();
 	// 
 	bool setFrames(CloudFramesPtr f);
 	void initView();
-	void initView(std::string& camfile);
+	void initView(const std::string& camfile);
 private:
+	bool show_floor = false;
+	bool show_bg = false;
+	bool show_roi = false;
+	std::vector<std::string> clusterNames;
+	std::vector<std::string> bbNames;
+
 	const std::string& CURRENT_CLOUD_LABEL = "current";
 	VizPtr viewer;
+
+	void drawBoundingBox(XYZcloudPtr cloud, char* name);
+	void renderFrames();
+	void renderClusters(std::vector<pcl::PointIndices>& clusterIdx);
 	void loadNextFrame();
 	void loadPrevFrame();
 	void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event, void* ud);
-	void pointPickingEventOccurred(const pcl::visualization::PointPickingEvent& event, void* ud);
 };
