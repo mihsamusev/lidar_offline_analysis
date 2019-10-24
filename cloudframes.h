@@ -13,6 +13,16 @@
 
 typedef pcl::PointCloud<pcl::PointXYZ>::Ptr XYZcloudPtr;
 
+struct MinAreaBoundingBox
+{
+	Eigen::Quaternionf quaternion;
+	Eigen::Matrix3f rotation;
+	Eigen::Vector3f translation;
+	double xDim = 0;
+	double yDim = 0;
+	double zDim = 0;
+};
+
 class CloudFrames
 {
 public:
@@ -31,6 +41,8 @@ public:
 	bool cropByROI();
 	bool subtractBackground();
 
+	MinAreaBoundingBox GetMinAreaBox(XYZcloudPtr cloud);
+
 	std::vector<pcl::PointIndices> clusterCloud(XYZcloudPtr cloud, float tol);
 private:
 	bool floorAlignedCC = false;
@@ -46,4 +58,7 @@ private:
 
 	void subtractBG(XYZcloudPtr bg_cloud, XYZcloudPtr cloud_in, XYZcloudPtr cloud_out,
 		double distTol, double stdCoeff);
+
+	void ProjectToXY(XYZcloudPtr cloud, XYZcloudPtr projectedCloud);
+	void Compute2dConvexHull(XYZcloudPtr projectedCloud, XYZcloudPtr outputHull);
 };

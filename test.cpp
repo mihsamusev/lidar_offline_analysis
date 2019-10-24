@@ -30,8 +30,8 @@ typedef std::unique_ptr<CloudViewer> CloudViewerPtr;
 typedef std::shared_ptr<CloudFrames> CloudFramesPtr;
 
 // global scope
-const std::string PATH = "C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data";
-unsigned int pc_id = 19000;
+const std::string PATH = 
+	"C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data";
 
 // functions
 void debugInfo(const std::string type, const std::string message)
@@ -45,7 +45,7 @@ main(int argc, char** argv)
 {
 	// some thats that are later going to be diefined in .ini file
 	const std::string CLOUDS_PATH = 
-		"C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data\\frames";
+		"C:\\Users\\msa\\Documents\\cpp\\pcl_analysis\\data\\framesdata";
 	const std::string BG_PATH =
 		"C:/Users/msa/Documents/cpp/pcl_analysis/data/background.pcd";
 	const std::string BB_PATH =
@@ -79,15 +79,15 @@ main(int argc, char** argv)
 	ch->subtractBackground();
 
 	debugInfo("[INFO]", "Initializing CloudViewer");
-	CloudViewerPtr viewer = std::make_unique<CloudViewer>();
-	if (viewer->setFrames(ch))
+	CloudViewerPtr viewer_ = std::make_unique<CloudViewer>();
+	if (viewer_->setFrames(ch))
 	{
-		viewer->initView(CAM_PATH);
+		viewer_->initView(CAM_PATH);
 	}
 
 	debugInfo("[INFO]", "Running visualization");
-	while(!viewer->wasStopped())
+	while(!viewer_->wasStopped())
 	{
-		viewer->spin();
+		viewer_->spin();
 	}
 }

@@ -1,3 +1,6 @@
+// original includes
+#include "cloudframes.h"
+
 // native C++ includes
 #include <iostream>
 #include <fstream>
@@ -5,28 +8,23 @@
 #include <vector>
 #include <cmath>
 
-// original includes
-#include "cloudframes.h"
-
 // 3rd party includes
 #include <Eigen/Geometry>
+#include <boost/filesystem.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
-#include <boost/filesystem.hpp>
 #include <pcl/common/transforms.h>
-
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
-
 #include <pcl/kdtree/kdtree.h>
+#include <pcl/surface/convex_hull.h>
 #include <pcl/segmentation/extract_clusters.h>
-#include <pcl/segmentation/conditional_euclidean_clustering.h>
-#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/segmentation/segment_differences.h>
-
 #include <pcl/segmentation//extract_polygonal_prism_data.h>
 #include <pcl/filters/extract_indices.h>
+#include <pcl/filters/project_inliers.h>
+#include <pcl/filters/statistical_outlier_removal.h>
 
 // aliases
 namespace fs = boost::filesystem;
@@ -180,6 +178,96 @@ bool CloudFrames::subtractBackground()
 		std::cout << "[ERROR] missing background cloud to perform substraction\n";
 		return false;
 	}
+}
+
+MinAreaBoundingBox CloudFrames::GetMinAreaBox(XYZcloudPtr cloud)
+{
+	MinAreaBoundingBox boxOut;
+
+	// get the height of the original cloud
+	Eigen::Vector4f minCloud;
+	Eigen::Vector4f maxCloud;
+	pcl::getMinMax3D(*cloud, minCloud, maxCloud);
+	boxOut.zDim = (double)fabs(maxCloud(2));
+
+	// get projected cloud
+	pcl::PointCloud<pcl::PointXYZ>::Ptr xyCloud(new pcl::PointCloud<pcl::PointXYZ>);
+	ProjectToXY(cloud, xyCloud);
+
+	// compute convexhull
+	pcl::PointCloud<pcl::PointXYZ>::Ptr xyHull(new pcl::PointCloud<pcl::PointXYZ>);
+	Compute2dConvexHull(xyCloud, xyHull);
+
+	// compute 3d centroid and positive and negative translation matrices
+	Eigen::Vector4f centroid;
+	pcl::compute3DCentroid(*xyHull, centroid);
+	Eigen::Matrix4f trCloudCenter2Origin(Eigen::Matrix4f::Identity());
+	trCloudCenter2Origin.block<3, 1>(0, 3) = -1.0f * centroid.head<3>().transpose();
+	Eigen::Matrix4f trOrigin2CloudCenter(Eigen::Matrix4f::Identity());
+	trOrigin2CloudCenter.block<3, 1>(0, 3) = centroid.head<3>().transpose();
+
+	Eigen::Matrix4f rotationToMinAreaBox = Eigen::Matrix4f::Identity();
+
+	// copy polygon
+	pcl::PointCloud<pcl::PointXYZ> polygon;
+	pcl::copyPointCloud(*xyHull, polygon);
+
+	// close the polygon
+	polygon.push_back(polygon.points[0]);
+
+	float minArea = FLT_MAX;
+
+	Eigen::Vector4f minPoint;
+	Eigen::Vector4f maxPoint;
+
+	for (size_t i = 0; i < polygon.points.size() - 1; i++)
+	{
+		Eigen::Vector4f p0 = polygon.points[i].getVector4fMap();
+		Eigen::Vector4f p1 = polygon.points[i + 1].getVector4fMap();
+
+		// obtain vectors directed along and perpendicular to edge normalized
+		Eigen::Vector4f along = p1 - p0;
+		along.normalize();
+		Eigen::Vector4f perp(-along(1), along(0), 0, 0);
+
+		// get rotation matrix and combine transformations
+		Eigen::Matrix4f rotation(Eigen::Matrix4f::Identity());
+		rotation.block<1, 4>(0, 0) = along;
+		rotation.block<1, 4>(1, 0) = perp;
+		Eigen::Matrix4f transform = rotation * trCloudCenter2Origin;
+
+		// Executing the transformation
+		pcl::PointCloud<pcl::PointXYZ> transformedPolygon;
+		pcl::transformPointCloud(polygon, transformedPolygon, transform);
+
+		Eigen::Vector4f minTemp;
+		Eigen::Vector4f maxTemp;
+		pcl::getMinMax3D(transformedPolygon, minTemp, maxTemp);
+
+		float area = (maxTemp(0) - minTemp(0)) * (maxTemp(1) - minTemp(1));
+		if (area < minArea)
+		{
+			minArea = area;
+			rotationToMinAreaBox = rotation;
+			minPoint = minTemp;
+			maxPoint = maxTemp;
+		}
+	}
+
+	// determine width and height, put to output box
+	boxOut.xDim = double(maxPoint(0) - minPoint(0));
+	boxOut.yDim = double(maxPoint(1) - minPoint(1));
+
+	// determine centroid of the bounding box and the translation from rotated bbox center to cloud center 
+	Eigen::Vector4f boxCentroid = 0.5f * (minPoint + maxPoint);
+
+	Eigen::Matrix3f reverseRotationToMinAreaBox = rotationToMinAreaBox.block<3, 3>(0, 0).transpose();
+	boxOut.rotation = reverseRotationToMinAreaBox;
+	boxOut.quaternion = Eigen::Quaternionf(reverseRotationToMinAreaBox);
+	boxOut.translation = centroid.head<3>() + reverseRotationToMinAreaBox * boxCentroid.head<3>();
+	boxOut.translation(2) = boxOut.zDim / 2;
+
+	return boxOut;
 }
 
 
@@ -346,6 +434,32 @@ void CloudFrames::subtractBG(XYZcloudPtr bg_cloud,
 	sor.setMeanK(50);
 	sor.setStddevMulThresh(stdCoeff);  // sor.setNegative(true); // to observe outlier values
 	sor.filter(*cloud_out);//*/
+}
+
+void CloudFrames::ProjectToXY(XYZcloudPtr cloud, XYZcloudPtr projectedCloud)
+{
+	pcl::ModelCoefficients::Ptr xyPlanePtr(new pcl::ModelCoefficients());
+	xyPlanePtr->values.resize(4);
+	xyPlanePtr->values[0] = 0.0f;
+	xyPlanePtr->values[1] = 0.0f;
+	xyPlanePtr->values[2] = 1.0f;
+	xyPlanePtr->values[3] = 0.0f;
+
+	pcl::ProjectInliers<pcl::PointXYZ> projector;
+	projector.setInputCloud(cloud);
+	projector.setModelType(pcl::SACMODEL_PLANE);
+	projector.setModelCoefficients(xyPlanePtr);
+	projector.filter(*projectedCloud);
+}
+
+void CloudFrames::Compute2dConvexHull(XYZcloudPtr projectedCloud, XYZcloudPtr outputHull)
+{
+	pcl::ConvexHull<pcl::PointXYZ> chull;
+	pcl::search::KdTree<pcl::PointXYZ>::Ptr tree;
+	chull.setSearchMethod(tree);
+	chull.setInputCloud(projectedCloud);
+	chull.setDimension(2);
+	chull.reconstruct(*outputHull);
 }
 
 

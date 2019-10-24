@@ -24,10 +24,10 @@ typedef std::shared_ptr<CloudFrames> CloudFramesPtr;
 class CloudViewer
 {
 public:
-	CloudFramesPtr frames;
-	int nFrames = 0;
-	int currentFrameId = 0;
-	XYZcloudPtr currentCloudPtr = nullptr;
+	CloudFramesPtr frames_;
+	int nFrames_ = 0;
+	int currentFrameId_ = 0;
+	XYZcloudPtr currentCloudPtr_ = nullptr;
 
 	// constructors
 	CloudViewer();
@@ -41,19 +41,21 @@ public:
 	void initView();
 	void initView(const std::string& camfile);
 private:
-	bool show_floor = false;
-	bool show_bg = false;
-	bool show_roi = false;
-	std::vector<std::string> clusterNames;
-	std::vector<std::string> bbNames;
+	bool show_floor_ = false;
+	bool show_bg_ = false;
+	bool show_roi_ = false;
+	std::vector<std::string> clusterNames_;
+	std::vector<std::string> bbNames_;
 
 	const std::string& CURRENT_CLOUD_LABEL = "current";
-	VizPtr viewer;
+	VizPtr viewer_;
 
-	void drawBoundingBox(XYZcloudPtr cloud, char* name);
-	void renderFrames();
-	void renderClusters(std::vector<pcl::PointIndices>& clusterIdx);
-	void loadNextFrame();
-	void loadPrevFrame();
-	void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event, void* ud);
+	void DrawBoundingBox(XYZcloudPtr cloud, char* name);
+	void RemoveClusters();
+	void RemoveBoxes();
+	void RenderFrames();
+	void RenderClusters(std::vector<pcl::PointIndices>& clusterIdx);
+	void LoadNextFrame();
+	void LoadPrevFrame();
+	void KeyboardEventOccurred(const pcl::visualization::KeyboardEvent& event, void* ud);
 };
