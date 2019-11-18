@@ -62,7 +62,7 @@ bool CloudFrames::readClouds(const std::string& path)
 
 	// count number of point cloud files
 	int nFiles = 0;
-	auto d = fs::directory_iterator(path);
+	auto d = fs::directory_iterator(path); // do we ned that???
 	for (fs::directory_entry& cloudFile : fs::directory_iterator(path))
 	{
 		nFiles++;
@@ -270,12 +270,21 @@ MinAreaBoundingBox CloudFrames::GetMinAreaBox(XYZcloudPtr cloud)
 	return boxOut;
 }
 
+void CloudFrames::GetSubcloud(XYZcloudPtr supercloud,
+	pcl::PointIndices::Ptr indices, XYZcloudPtr subcloud)
+{
+	pcl::ExtractIndices<pcl::PointXYZ> extract;
+	extract.setInputCloud(supercloud);
+	extract.setIndices(indices);
+	extract.filter(*subcloud);
+}
+
 
 
 std::vector<pcl::PointIndices> 
 CloudFrames::clusterCloud(XYZcloudPtr cloud, float tol)
 {
-	int minPts = cloud->points.size() / 1000; // 0.1% pts
+	int minPts = cloud->points.size() / 100; // 0.1% pts
 	int maxPts = cloud->points.size(); // all pts
 
 	std::vector<pcl::PointIndices> cluster_indices;
@@ -293,6 +302,8 @@ CloudFrames::clusterCloud(XYZcloudPtr cloud, float tol)
 
 	return cluster_indices;
 }
+
+
 
 // PRIVATE METHODS
 

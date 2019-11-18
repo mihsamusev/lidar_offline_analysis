@@ -1,11 +1,11 @@
+// project includes
+#include <cloudviewer.h>
+
 // native c++ includes
 #include <string>
 #include <iostream>
 #include <vector>
-
-// project includes
-#include <cloudframes.h>
-#include <cloudviewer.h>
+#include <tuple>
 
 // 3rd party inlcudes
 #include <pcl/common/common_headers.h>
@@ -13,6 +13,8 @@
 #include <pcl/io/pcd_io.h> // temporary, just for BG
 #include <pcl/features/normal_3d.h>
 #include <pcl/common/transforms.h>
+#include <cloudframes.h>
+#include <clustercentroidtracker.h>
 
 // aliases
 typedef pcl::PointCloud<pcl::PointXYZ>::ConstPtr XYZcloudCPtr;
@@ -27,6 +29,8 @@ CloudViewer::CloudViewer()
 {
 	VizPtr v(new Viz("Cloud Viewer"));
 	viewer_ = v;
+	tracker_ = CentroidTracker(5);
+	InitColorScheme(255);
 }
 
 // wrappers for PCLVizualizer
@@ -85,50 +89,78 @@ bool CloudViewer::setFrames(CloudFramesPtr f)
 }
 
 // put next frame for rendering by viewer_
-void CloudViewer::LoadNextFrame()
+void CloudViewer::ProcessNextFrame()
 {
-	int frame = currentFrameId_;
-
 	// test is frame is not over the bounds
-	if (++frame < nFrames_)
-	{
-		// update id and pointer
+	int frame = currentFrameId_;
+	if (++frame < nFrames_) {
+		// update id, pointer, calculate clusters for
+		// current cloud and render them
 		currentFrameId_++;
 		currentCloudPtr_ = frames_->clouds[currentFrameId_]; 
-			
-		// experimental
-		std::vector<pcl::PointIndices> clusterIdx =
-			frames_->clusterCloud(currentCloudPtr_, 1);
-		//viewer_->removeAllPointClouds();
-
-		RemoveClusters();
-		RemoveBoxes();
-		RenderClusters(clusterIdx);
+		// render veiwer with clusters boxes and ids
+		UpdateViewer();
 	}
 }
 
 // put prev frame for rendering by viewer_
-void CloudViewer::LoadPrevFrame()
+void CloudViewer::ProcessPrevFrame()
 {
-	int frame = currentFrameId_;
-
 	// test is frame is not over the bounds
-	if (--frame >= 0)
-	{
-		// update id and pointer
+	int frame = currentFrameId_;
+	if (--frame >= 0) {
+		// update id, pointer, calculate clusters for
+		// current cloud and render them
 		currentFrameId_--;
 		currentCloudPtr_ = frames_->clouds[currentFrameId_];
-		//RenderFrames();
-
-		// experimental
-		std::vector<pcl::PointIndices> clusterIdx =
-			frames_->clusterCloud(currentCloudPtr_, 1);
-		//viewer_->removeAllPointClouds();
-
-		RemoveClusters();
-		RemoveBoxes();
-		RenderClusters(clusterIdx);
+		// render veiwer with clusters boxes and ids
+		UpdateViewer();
 	}
+}
+
+void CloudViewer::UpdateViewer()
+{
+	// clean viewer from graphics of previous frame
+	RemoveTracks(tracker_);
+	RemoveClusters();
+
+	// cluster current cloud
+	std::vector<pcl::PointIndices> clusterIdx =
+		frames_->clusterCloud(currentCloudPtr_, 1); // magic number
+
+	// Get clouds and cloud centers from indices for tracking
+	std::vector<XYZcloudPtr> clusters;
+	std::vector<Eigen::Vector3f> clusterCentroids;
+
+	clusters.reserve(clusterIdx.size());
+	clusterCentroids.reserve(clusterIdx.size());
+
+	for (int i = 0; i < clusterIdx.size(); i++) {
+		// only process large clusters
+		if (clusterIdx[i].indices.size() < 20) { // magic number
+			continue;
+		}
+
+		clusters.emplace_back(new XYZcloud);
+		boost::shared_ptr<pcl::PointIndices> clusterIdxPtr =
+			boost::make_shared<pcl::PointIndices>(clusterIdx[i]);
+		frames_->GetSubcloud(currentCloudPtr_, clusterIdxPtr, clusters[i]);
+
+		Eigen::Vector4f center;
+		pcl::compute3DCentroid(*clusters[i], center);
+		clusterCentroids.emplace_back(center(0), center(1), center(2));
+	}
+
+	// update tracker and print list of objects
+	tracker_.Update(clusters);
+	tracker_.PrintObjects();
+
+	// visualize trackings
+	RenderTracks(tracker_);
+	//RenderFrames();
+
+	//std::string name = std::to_string(currentFrameId_) + ".png";
+	//viewer_->saveScreenshot(name);
 }
 
 void CloudViewer::DrawBoundingBox(XYZcloudPtr cloud, char* name)
@@ -182,7 +214,7 @@ void CloudViewer::RenderFrames()
 	viewer_->removePointCloud(CURRENT_CLOUD_LABEL);
 	viewer_->addPointCloud(currentCloudPtr_, CURRENT_CLOUD_LABEL);
 	viewer_->setPointCloudRenderingProperties(
-		pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, CURRENT_CLOUD_LABEL);
+		pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, CURRENT_CLOUD_LABEL);
 }
 
 void CloudViewer::RemoveClusters()
@@ -190,6 +222,7 @@ void CloudViewer::RemoveClusters()
 	for (size_t i = 0; i < clusterNames_.size(); i++)
 	{
 		viewer_->removePointCloud(clusterNames_[i]);
+		viewer_->removeText3D("ID_" + std::to_string(i));
 	}
 	clusterNames_.clear();
 }
@@ -203,10 +236,63 @@ void CloudViewer::RemoveBoxes()
 	bbNames_.clear();
 }
 
+void CloudViewer::RenderTracks(CentroidTracker &tracker)
+{
+	std::map<int, Eigen::Vector3f>::iterator it;
+	for (it = tracker.objects.begin(); it != tracker.objects.end(); it++) {
+		int objectID = it->first;
+		if (tracker.disappeared[objectID] > 0){
+			continue;
+		}
+		std::string text = "ID_" + std::to_string(objectID);
+		std::string textTag = "text_" + std::to_string(objectID);
+		std::string boxTag = "box_" + std::to_string(objectID);
+		std::string clusterTag = "cluster_" + std::to_string(objectID);
+
+		// render label
+		pcl::PointXYZ position(it->second(0), it->second(1), it->second(2));
+		viewer_->addText3D(text, position, 1, 0, 1, 0, textTag);
+
+		// render bounding box
+		MinAreaBoundingBox myBox = frames_->GetMinAreaBox(tracker.clusters[objectID]);
+		viewer_->addCube(myBox.translation, myBox.quaternion,
+			myBox.xDim, myBox.yDim, myBox.zDim, boxTag);
+		viewer_->setShapeRenderingProperties(
+			pcl::visualization::PCL_VISUALIZER_REPRESENTATION,
+			pcl::visualization::PCL_VISUALIZER_REPRESENTATION_WIREFRAME, boxTag);
+		viewer_->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR,
+			0, 1, 0, boxTag);
+
+		// render cluster itself	
+		viewer_->addPointCloud<pcl::PointXYZ>(tracker.clusters[objectID], clusterTag);
+		float r = std::get<0>(colorscheme_[objectID]);
+		float g = std::get<1>(colorscheme_[objectID]);
+		float b = std::get<2>(colorscheme_[objectID]);
+		viewer_->setPointCloudRenderingProperties(
+			pcl::visualization::PCL_VISUALIZER_COLOR, r, g, b, clusterTag);
+		viewer_->setPointCloudRenderingProperties(
+			pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, clusterTag);	
+	}
+}
+
+void CloudViewer::RemoveTracks(CentroidTracker &tracker)
+{
+	std::map<int, Eigen::Vector3f>::iterator it;
+	for (it = tracker.objects.begin(); it != tracker.objects.end(); it++) {
+		int objectID = it->first;
+		std::string textTag = "text_" + std::to_string(objectID);
+		std::string boxTag = "box_" + std::to_string(objectID);
+		std::string clusterTag = "cluster_" + std::to_string(objectID);
+		viewer_->removeText3D(textTag);
+		viewer_->removeShape(boxTag);
+		viewer_->removePointCloud(clusterTag);
+	}
+}
+
 void CloudViewer::RenderClusters(std::vector<pcl::PointIndices>& clusterIdx)
 {
 	// add clusters
-	int n = 0;
+	int clusterID = 0;
 	for (auto it = clusterIdx.begin(); it != clusterIdx.end(); ++it)
 	{
 		pcl::PointCloud<pcl::PointXYZ>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZ>);
@@ -222,9 +308,9 @@ void CloudViewer::RenderClusters(std::vector<pcl::PointIndices>& clusterIdx)
 		// take care of naming
 		char cloudname[10];
 		char boxname[10];
-		sprintf(cloudname, "c_%03d", n);
-		sprintf(boxname, "b_%03d", n);
-		n++;
+		sprintf(cloudname, "c_%03d", clusterID);
+		sprintf(boxname, "b_%03d", clusterID);
+
 		clusterNames_.push_back(cloudname);
 		bbNames_.push_back(boxname);
 
@@ -237,7 +323,7 @@ void CloudViewer::RenderClusters(std::vector<pcl::PointIndices>& clusterIdx)
 			pcl::visualization::PCL_VISUALIZER_COLOR, r, g, b, cloudname);
 		viewer_->setPointCloudRenderingProperties(
 			pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, cloudname);
-
+		/*
 		if (cluster->points.size() > 20)
 		{
 			//DrawBoundingBox(cluster, boxname);
@@ -247,7 +333,15 @@ void CloudViewer::RenderClusters(std::vector<pcl::PointIndices>& clusterIdx)
 			viewer_->setShapeRenderingProperties(
 				pcl::visualization::PCL_VISUALIZER_REPRESENTATION,
 				pcl::visualization::PCL_VISUALIZER_REPRESENTATION_WIREFRAME, boxname);
+
+			std::string textname = "ID_" + std::to_string(clusterID);
+			viewer_->addText3D(textname, cluster->points[0], 0.5,
+				r, g, b, textname);
+			viewer_->setShapeRenderingProperties(
+				pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 2, textname);
 		}
+		*/
+		clusterID++;
 	}
 }
 
@@ -256,11 +350,11 @@ void CloudViewer::KeyboardEventOccurred(const pcl::visualization::KeyboardEvent&
 {
 	if (event.getKeySym() == "Right" && event.keyDown()) // proceed frame backwards
 	{
-		LoadNextFrame();
+		ProcessNextFrame();
 	}
 	else if (event.getKeySym() == "Left" && event.keyDown()) // proceed frame forwards
 	{
-		LoadPrevFrame();
+		ProcessPrevFrame();
 	}
 	else if (event.getKeySym() == "n" && event.keyDown()) // turn the floor on and off
 	{
@@ -322,36 +416,27 @@ void CloudViewer::KeyboardEventOccurred(const pcl::visualization::KeyboardEvent&
 	}
 	else if (event.getKeySym() == "v" && event.keyDown())
 	{
-		std::vector<pcl::PointIndices> clusterIdx =
-			frames_->clusterCloud(currentCloudPtr_, 1);
+		// total reset
+		//viewer_->removePointCloud(CURRENT_CLOUD_LABEL);
+		RemoveTracks(tracker_);
+		tracker_ = CentroidTracker(5); // magic number
 
-		int maxClusterPos = 0;
-		int maxClusterSize = 0;
-
-		for (size_t i = 0; i < clusterIdx.size(); i++)
-		{
-			if (clusterIdx[i].indices.size() >= maxClusterSize)
-			{
-				maxClusterSize = clusterIdx[i].indices.size();
-				maxClusterPos = i;
-			}
-		}
-
-		pcl::PointIndices maxClusterIdx = clusterIdx[maxClusterPos];
-		pcl::PointCloud<pcl::PointXYZ>::Ptr maxCluster(new pcl::PointCloud<pcl::PointXYZ>);
-		maxCluster->width = maxClusterIdx.indices.size();
-		maxCluster->height = 1;
-		maxCluster->is_dense = true;
-		maxCluster->points.reserve(maxCluster->width);
-		for (auto pit = maxClusterIdx.indices.begin(); pit != maxClusterIdx.indices.end(); ++pit)
-		{
-			maxCluster->points.push_back(currentCloudPtr_->points[*pit]);
-		}
-
-		std::string name = "largest_cloud" + std::to_string(currentFrameId_) + ".pcd";
-		int result = pcl::io::savePCDFile(name, *maxCluster);
-
-		std::cout << "saving file: " << result << std::endl;
+		currentFrameId_= 0;
+		currentCloudPtr_ = frames_->clouds[0];
+		UpdateViewer();
 	}
 }
+
+void CloudViewer::InitColorScheme(int count)
+{
+	colorscheme_.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		float r = rand() / (RAND_MAX + 1.0f);
+		float g = rand() / (RAND_MAX + 1.0f);
+		float b = rand() / (RAND_MAX + 1.0f);
+		colorscheme_.emplace_back(r, g, b);
+	}
+}
+
 

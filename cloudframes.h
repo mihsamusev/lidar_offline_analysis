@@ -42,7 +42,8 @@ public:
 	bool subtractBackground();
 
 	MinAreaBoundingBox GetMinAreaBox(XYZcloudPtr cloud);
-
+	void GetSubcloud(XYZcloudPtr supercloud,
+		pcl::PointIndices::Ptr indices, XYZcloudPtr subcloud);
 	std::vector<pcl::PointIndices> clusterCloud(XYZcloudPtr cloud, float tol);
 private:
 	bool floorAlignedCC = false;
